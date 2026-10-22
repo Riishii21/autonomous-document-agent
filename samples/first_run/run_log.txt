@@ -1,0 +1,85 @@
+# First run (before fixes) - terminal output, 22 Oct 2026
+# Model: openai/gpt-oss-120b on Groq, sequential section drafting, default reasoning effort
+
+================================================================================
+STANDARD REQUEST:
+Create meeting minutes for our Q3 product review held on 15 October 2026. Attendees: Priya (Product Manager), Arjun (Engineering Lead), Neha (Sales Head). Decisions: launch the mobile app on 15 November; move the analytics dashboard to Q1 2027. Action items: Arjun to finalise the payments API by 30 October; Neha to brief our top 10 clients on the launch by 5 November.
+================================================================================
+
+Understood as: meeting_minutes - 'Q3 Product Review Meeting Minutes' for Internal product, engineering, and sales teams
+  [missing_info] Meeting start time
+  [missing_info] Meeting end time
+  [missing_info] Meeting location or virtual platform
+  [missing_info] Person responsible for recording the minutes
+  [missing_info] Any additional agenda items or discussion points beyond the listed decisions and action items
+  [assumptions] Meeting started at 10:00 AM and ended at 11:30 AM
+  [assumptions] The meeting was held virtually via a video‑conference platform
+  [assumptions] Priya (Product Manager) recorded the minutes
+  [assumptions] No other agenda items were discussed beyond the decisions and action items provided
+
+Agent-generated TODO list:
+  [x] 1. Executive Summary                      tool=executive_summary
+  [x] 2. Meeting Details                        tool=draft_section
+  [x] 3. Agenda                                 tool=draft_section
+  [x] 4. Decisions                              tool=draft_section
+  [x] 5. Action Items                           tool=build_table
+  [x] 6. Assumptions & Open Questions           tool=assumptions_register
+
+Self-check: score 7/10 -> 9/10 after revising ['Meeting Details', 'Executive Summary']
+  - Meeting Details: The paragraph in the "Meeting Details" section states assumed information (start time, end time, virtual platform, minute‑taker) as factual, which contradicts the analysis that these items are unconfirmed assumptions.
+
+Summary: Generated a meeting minutes titled 'Q3 Product Review Meeting Minutes' by planning and executing 6 tasks (6 succeeded). Made 4 documented assumptions and resolved 0 conflicting requirements. Self-check scored the first draft 7/10 and revised 2 section(s); final score 9/10.
+Document saved: outputs/demo_standard.docx  (63.4s total)
+
+================================================================================
+COMPLEX REQUEST:
+We need a plan to move our CRM to the cloud. Budget is tight but leadership wants it done in 6 weeks with zero downtime. Not sure how many users we have. Make something I can show the CTO.
+================================================================================
+
+Understood as: project_plan - 'CRM Cloud Migration Plan' for Chief Technology Officer (CTO) and senior leadership
+  [missing_info] Exact number of CRM users
+  [missing_info] Current CRM platform and version (e.g., Salesforce, Microsoft Dynamics, custom)
+  [missing_info] Existing on‑premise infrastructure details (servers, storage, network)
+  [missing_info] Target cloud provider or preferred platform (AWS, Azure, GCP, etc.)
+  [missing_info] Estimated data volume and storage requirements
+  [missing_info] List of integrations with other systems (e.g., ERP, marketing automation)
+  [missing_info] Compliance or security requirements (e.g., GDPR, HIPAA)
+  [missing_info] Allocated budget amount (currency)
+  [missing_info] Available internal resources (team members, skill sets)
+  [missing_info] Preferred migration tools or services (e.g., native tools, third‑party)
+  [missing_info] Backup and rollback strategy expectations
+  [missing_info] Service level agreement (SLA) expectations for post‑migration performance
+  [conflicts] Tight budget may limit ability to procure premium migration tools or additional staffing needed to guarantee zero‑downtime within a 6‑week schedule
+  [assumptions] The CRM has approximately 200 active users (typical mid‑size deployment)
+  [assumptions] The current CRM is an on‑premise Microsoft Dynamics 365 instance running on standard Windows Server VMs
+  [assumptions] The target cloud platform will be Microsoft Azure (aligned with existing Microsoft ecosystem)
+  [assumptions] Data volume is under 5 TB, fitting within standard Azure storage tiers without special pricing
+  [assumptions] Key integrations are limited to an ERP system and an email marketing platform, both with available cloud connectors
+  [assumptions] Compliance requirements are limited to standard GDPR controls, already supported by Azure services
+  [assumptions] The tight budget allows for use of existing staff plus a modest allocation for a third‑party migration consultancy (up to $25,000)
+  [assumptions] Internal team includes a lead cloud architect, two DBAs, and a project manager who can dedicate 50 % of their time to the effort
+  [assumptions] Migration will use Azure Site Recovery and native Dynamics 365 migration tools, avoiding costly third‑party licenses
+  [assumptions] A phased replication approach (active‑passive with real‑time sync) will be employed to achieve zero downtime
+  [assumptions] Backup will be performed daily using Azure Backup, and a rollback plan includes retaining the on‑premise environment for 2 weeks post‑cutover
+
+Agent-generated TODO list:
+  [x] 1. Executive Summary                      tool=executive_summary
+  [x] 2. Project Scope & Objectives             tool=draft_section
+  [x] 3. Assumptions, Open Questions & Conflicts tool=assumptions_register
+  [x] 4. Migration Approach                     tool=draft_section
+  [!] 5. Project Timeline                       tool=build_table
+  [x] 6. Budget Estimate                        tool=build_table
+  [x] 7. Risk Management                        tool=draft_section
+  [x] 8. Governance & Communication             tool=draft_section
+  [x] 9. Next Steps & Decision Points           tool=draft_section
+
+Self-check: score 7/10 -> 9/10 after revising ['Budget Estimate', 'Governance & Communication', 'Executive Summary']
+  - Budget Estimate: The budget table includes specific cost figures ($56,650 total, $13,500 internal staff effort) that were not provided in the analysis and are presented as definitive numbers, which constitutes an unlabelled invented fact.
+  - Governance & Communication: Specific names (e.g., Alex Rivera, Maria Chen) are introduced without any basis in the original request or analysis, creating invented facts.
+  - Executive Summary: The summary cites a precise total budget ($56.6k) and consultancy cap ($25k) as fixed amounts, while the original request only mentioned a "tight budget" without specifying numbers. This presents unverified figures.
+
+Summary: Generated a project plan titled 'CRM Cloud Migration Plan' by planning and executing 9 tasks (8 succeeded). Made 11 documented assumptions and resolved 1 conflicting requirements. Self-check scored the first draft 7/10 and revised 3 section(s); final score 9/10.
+Document saved: outputs/demo_complex.docx  (290.3s total)
+
+# Error recorded for the failed task (plan[4], Project Timeline), from outputs/demo_complex.json:
+BadRequestError: Error code: 400 - {'error': {'message': "Failed to generate JSON. Please adjust your prompt. See 'failed_generation' for more details.", 'type': 'invalid_request_error', 'code': 'json_validate_failed', 'failed_generation': '{"title":"Project Timeline","blocks":[{"type":"paragraph"," [truncated]
