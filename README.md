@@ -27,6 +27,15 @@ Run both assignment test cases (server must be running):
 python scripts/run_demo.py          # writes outputs/demo_standard.docx and outputs/demo_complex.docx
 ```
 
+Or with Docker:
+
+```bash
+docker build -t doc-agent .
+docker run --env-file .env -p 8000:8000 -v "$PWD/outputs:/app/outputs" doc-agent
+```
+
+Sample outputs from real runs are in [`samples/`](samples/) (documents plus the full JSON trace), and `samples/first_run/` holds the log of the first run before the fixes described below.
+
 Run the offline test suite (no API key needed, uses a scripted fake LLM):
 
 ```bash
@@ -37,9 +46,10 @@ pytest -q
 
 | Method | Path | Purpose |
 |---|---|---|
-| `POST` | `/agent` | Body `{"request": "..."}`. Runs the agent; returns interpretation, plan, reflection, summary, execution log and `document_url`. |
+| `POST` | `/agent` | Body `{"request": "..."}`. Runs the agent; returns interpretation, plan (TODO list with per-task status), reflection, summary, execution log with timings, token usage and `document_url`. |
 | `GET` | `/documents/{request_id}` | Downloads the generated .docx. |
-| `GET` | `/health` | Provider and model in use. |
+| `GET` | `/runs/{request_id}` | Full trace of a past run, for auditing and debugging. |
+| `GET` | `/health` | Provider and models in use. |
 
 Errors: `422` invalid or non-document request (guardrail), `502` LLM could not produce valid output after retries, `500` no section could be generated.
 
@@ -62,7 +72,14 @@ POST /agent
                header and page-numbered footer (no LLM in this step)
 ```
 
-**Tools** (`app/tools.py`): `draft_section`, `build_table`, `executive_summary` (LLM-backed) and `assumptions_register` (deterministic, renders exactly what the analysis recorded so assumptions can't drift).
+**Tools** (`app/tools.py`), chosen per task by the planner. They deliberately trust the model to different degrees:
+
+| Tool | Who does the work | Why |
+|---|---|---|
+| `draft_section`, `build_table` | LLM writes the content | Prose and structure are what LLMs are good at. |
+| `executive_summary` | LLM, but deferred until all other sections exist | A summary must summarise the real content. |
+| `estimate_costs` | LLM estimates effort per role; **code** prices it from a rate card and computes totals | LLMs invent rates and get arithmetic wrong. Roles are validated against the rate card, so an unknown role is rejected and retried, never priced. |
+| `assumptions_register` | No LLM, fully deterministic | Renders exactly what the analysis recorded, so assumptions can't drift between steps. |
 
 **Design principle:** the LLM decides *what* to do (document type, structure, content, review verdict); plain Python decides *how* it runs (dispatch, ordering, failure isolation, rendering).
 
@@ -71,6 +88,12 @@ POST /agent
 After drafting, a separate reviewer prompt compares the whole document against the original request and the analysis: are all stated facts present, are conflicts actually resolved, is anything missing for this document type, are invented figures labelled? It returns a score and per-section issues. The agent then rewrites only the flagged sections (or plans a new section if one is missing), regenerates the summary so it stays consistent, and re-scores.
 
 Why: single-pass LLM drafts regularly drop explicit requirements, especially in long or conflicting requests. Catching this before the user does is the cheapest quality gain available. It's bounded to one revision round to cap latency and token use on the free tier.
+
+## Observability
+
+Every response (and `/runs/{id}`) includes per-step timings, each task's status and error, the self-check result, and usage: logical LLM calls, actual API requests (the gap is JSON-repair retries) and tokens. Usage is metered per run with a thread-safe counter, because the agent instance is shared across concurrent requests.
+
+Optional `REVIEW_MODEL` runs the self-check on a different model than the writer, so the drafting model isn't grading its own work.
 
 ## Reliability
 
@@ -89,6 +112,7 @@ app/
   main.py          FastAPI routes and error mapping
   agent.py         orchestrator: analyze -> plan -> execute -> reflect -> compile
   tools.py         tool registry
+  reference_data.py + data/rate_card.json   mock reference data used by estimate_costs
   llm.py           OpenAI-compatible client (Groq / Ollama) with structured output + retry
   prompts.py       all prompts
   schemas.py       Pydantic models for API and LLM outputs
@@ -96,7 +120,15 @@ app/
   config.py        env-based settings
 scripts/run_demo.py  runs both test cases end to end
 tests/               offline tests with a fake LLM
+samples/             real outputs (docx + JSON trace)
 ```
+
+## Key design decisions
+
+- **Plan-and-execute over a free-form ReAct loop.** Business documents need predictable structure and bounded cost. The LLM decides what goes in the plan; the order of the pipeline is fixed. A ReAct loop would add flexibility this task doesn't need, at the cost of unpredictable call counts and harder debugging.
+- **Single agent with specialised steps over multi-agent.** The steps share one context and run in sequence; separate agents would add hand-off overhead without new capability. The reviewer is the one place where independence matters, which is why it can use a different model.
+- **Decide shared facts before fanning out.** Drafting sections in parallel cut runtime roughly in half, but independently written sections drifted apart (two different schedules, owners the budget didn't pay for). Instead of going back to sequential drafting, the planner now fixes `key_decisions` (phases with week ranges, approach, owning roles) once, every parallel writer receives them plus the document outline, and the reviewer explicitly checks cross-section consistency against them.
+- **Structured output everywhere.** Every LLM step returns a Pydantic-validated object, so failures surface at the boundary with a precise error the model can correct, not three steps later.
 
 ## Scaling notes
 

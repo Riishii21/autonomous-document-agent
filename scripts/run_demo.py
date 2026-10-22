@@ -51,7 +51,10 @@ def run(name: str, request: str) -> None:
     for issue in ref["issues_found"]:
         print(f"  - {issue['section_title']}: {issue['problem']}")
 
-    print(f"\nSummary: {body['summary']}")
+    u = body["usage"]
+    print(f"\nUsage: {u['llm_calls']} LLM calls, {u['api_requests']} API requests, "
+          f"{u['prompt_tokens'] + u['completion_tokens']:,} tokens  (models: {body['models']})")
+    print(f"Summary: {body['summary']}")
     doc = httpx.get(BASE + body["document_url"], timeout=60)
     out = Path("outputs") / f"demo_{name}.docx"
     out.parent.mkdir(exist_ok=True)

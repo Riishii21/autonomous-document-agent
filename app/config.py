@@ -20,6 +20,8 @@ PROVIDERS = {
 class Settings:
     provider: str = os.getenv("LLM_PROVIDER", "groq").lower()
     model: str = os.getenv("LLM_MODEL", "openai/gpt-oss-120b")
+    # Optional different model for the self-check, so the drafter doesn't grade itself.
+    review_model: str = os.getenv("REVIEW_MODEL", "")
     api_key: str = os.getenv("GROQ_API_KEY", "ollama")  # Ollama ignores the key
     temperature: float = float(os.getenv("LLM_TEMPERATURE", "0.3"))
     # For reasoning models (gpt-oss): low/medium/high. Empty = provider default.

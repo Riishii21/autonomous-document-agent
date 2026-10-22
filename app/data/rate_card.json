@@ -1,0 +1,19 @@
+{
+  "_note": "Mock reference data for the assignment. In production this would come from a finance system or database.",
+  "currency": "USD",
+  "contingency_pct": 15,
+  "day_rates": {
+    "Project Manager": 600,
+    "Business Analyst": 550,
+    "Solution Architect": 900,
+    "Cloud Engineer": 750,
+    "Software Engineer": 650,
+    "Data Engineer": 700,
+    "QA Engineer": 500,
+    "DevOps Engineer": 750,
+    "Security Specialist": 850,
+    "UX Designer": 600,
+    "Trainer": 450,
+    "Support Engineer": 400
+  }
+}

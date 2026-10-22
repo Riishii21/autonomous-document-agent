@@ -8,10 +8,13 @@ from __future__ import annotations
 import json
 import logging
 import re
+import threading
 from typing import Protocol, TypeVar
 
 from openai import BadRequestError, OpenAI
 from pydantic import BaseModel, ValidationError
+
+from .schemas import UsageStats
 
 log = logging.getLogger("agent.llm")
 T = TypeVar("T", bound=BaseModel)
@@ -23,6 +26,40 @@ class LLMError(RuntimeError):
 
 class LLM(Protocol):
     def generate(self, system: str, user: str, schema: type[T]) -> T: ...
+
+
+class Meter:
+    """Thread-safe usage counter for ONE agent run (sections are drafted concurrently)."""
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self.usage = UsageStats()
+
+    def record_call(self) -> None:
+        with self._lock:
+            self.usage.llm_calls += 1
+
+    def record_request(self, prompt_tokens: int = 0, completion_tokens: int = 0) -> None:
+        with self._lock:
+            self.usage.api_requests += 1
+            self.usage.prompt_tokens += prompt_tokens
+            self.usage.completion_tokens += completion_tokens
+
+
+class MeteredLLM:
+    """Wraps any LLM and attributes its usage to a per-run Meter.
+
+    The agent is a shared singleton serving concurrent requests, so usage is tracked
+    on a per-run wrapper rather than on the client itself."""
+
+    def __init__(self, inner: LLM, meter: Meter):
+        self.inner, self.meter = inner, meter
+
+    def generate(self, system: str, user: str, schema: type[T]) -> T:
+        self.meter.record_call()
+        if isinstance(self.inner, OpenAICompatibleLLM):
+            return self.inner.generate(system, user, schema, meter=self.meter)
+        return self.inner.generate(system, user, schema)
 
 
 def _extract_json(raw: str) -> str:
@@ -58,7 +95,7 @@ class OpenAICompatibleLLM:
         # Sent only when set, so non-reasoning models/providers are unaffected.
         self._extra = {"reasoning_effort": reasoning_effort} if reasoning_effort else None
 
-    def generate(self, system: str, user: str, schema: type[T]) -> T:
+    def generate(self, system: str, user: str, schema: type[T], meter: Meter | None = None) -> T:
         messages = [{"role": "system", "content": system}, {"role": "user", "content": user}]
         last_error: Exception | None = None
 
@@ -72,7 +109,13 @@ class OpenAICompatibleLLM:
                     extra_body=self._extra,
                 )
                 raw = resp.choices[0].message.content or ""
+                if meter:
+                    u = resp.usage
+                    meter.record_request(getattr(u, "prompt_tokens", 0) or 0,
+                                         getattr(u, "completion_tokens", 0) or 0)
             except BadRequestError as exc:
+                if meter:
+                    meter.record_request()
                 # Groq validates JSON mode server-side: malformed output comes back as a
                 # 400 json_validate_failed (with the bad text attached) instead of a response.
                 # Treat it like any other invalid output so the self-correction loop handles it.

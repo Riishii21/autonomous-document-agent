@@ -21,8 +21,8 @@ _BOLD = re.compile(r"\*\*(.+?)\*\*")
 
 def _clean(text: str) -> str:
     """Strip markdown the model may still emit (#, list dashes, stray asterisks)."""
-    text = re.sub(r"^\s*(#{1,6}\s+|[-*•]\s+)", "", text.strip())
-    return text
+    lines = [re.sub(r"^\s*(#{1,6}\s+|[-*•]\s+)", "", line) for line in text.strip().split("\n")]
+    return "\n".join(line for line in lines if line.strip())
 
 
 def _add_rich_text(paragraph, text: str) -> None:

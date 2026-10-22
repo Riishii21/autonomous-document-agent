@@ -41,6 +41,9 @@ Available tools:
 - draft_section: write a prose/bullet section (e.g. Background, Scope, Approach, Decisions, Risks).
 - build_table: a section whose core is a table (e.g. timeline, budget, action items, RACI, risk matrix).
   Mock/illustrative figures are allowed but must be labelled as estimates.
+- estimate_costs: any budget, cost or resourcing-cost section. You only estimate effort per role;
+  the tool prices it from the company rate card and computes totals in code.
+  Always use this instead of build_table for money.
 - executive_summary: summary of the whole document. Runs AFTER all other sections are drafted,
   but place it where it should appear (usually first).
 - assumptions_register: lists assumptions, open questions and conflicts. Include it whenever the
@@ -50,8 +53,15 @@ Rules: 4 to 9 tasks. Choose sections that fit THIS doc_type (meeting minutes nee
 decisions and action items; a project plan needs scope, timeline, risks, etc.).
 If there are conflicts, plan a section that explicitly resolves or trades them off.
 
+Sections are written IN PARALLEL by separate writers who cannot see each other's work.
+So also decide key_decisions: 3-8 short statements every section must follow, e.g. the
+approach, each phase with its exact week range, and which roles (from AVAILABLE ROLES) own
+what. Anything two sections could state differently (dates, phases, owners, technology)
+must be fixed here. For record-type documents, key_decisions can simply restate the given facts.
+
 Return JSON:
 {"reasoning": "one or two sentences on why this structure",
+ "key_decisions": ["Phase 1 (weeks 1-2): ...", "..."],
  "tasks": [{"id": 1, "description": "...", "tool": "draft_section", "section_title": "...",
             "instructions": "what this section must cover"}]}"""
 
@@ -72,11 +82,22 @@ Write ONE section built around a table (timeline, budget, action items, RACI, ri
 Start with a one-sentence paragraph introducing the table, then the table (3-8 rows),
 then optionally a short paragraph of notes. Every row must have as many cells as there are headers,
 and every cell must be a string (write "2,500", not 2500). Mark mock figures as estimates and
-use roles, not invented names, for owners.
+use roles, not invented names, for owners. If a cell needs several points, separate them
+with "\\n" (one point per line), never with " - ".
 
 {BLOCK_FORMAT}
 
 Return JSON: {{"title": "<section title>", "blocks": [ ... ]}}"""
+
+COST_SYSTEM = """You are the estimation module of an autonomous business-document agent.
+Estimate the EFFORT (person-days) per role needed for the work in the brief.
+Do NOT give prices or totals: those are computed from the company rate card by code.
+Use only roles from AVAILABLE ROLES, spelled exactly. 3-8 line items.
+Respect the brief's constraints (a tight budget means a lean team; a short deadline caps total days
+per role, e.g. 6 weeks is at most 30 working days per person).
+Put the key estimating assumptions in notes (one or two sentences).
+
+Return JSON: {"line_items": [{"role": "...", "activity": "what they do", "days": 10}], "notes": "..."}"""
 
 SUMMARY_SYSTEM = f"""You write the executive summary of a business document that has already been drafted.
 Summarise the purpose, the key points/decisions, and the recommended next step in 80-150 words.
@@ -90,9 +111,15 @@ REVIEW_SYSTEM = """You are the quality reviewer (self-check) of an autonomous do
 Compare the drafted document against the ORIGINAL request and the analysis. Check:
 1. Every explicit requirement and fact in the request is covered correctly.
 2. Every conflict in the analysis is addressed with a clear resolution or trade-off.
-3. No section contradicts the request or another section.
-4. Nothing important is missing for this doc_type.
-5. No unlabelled invented facts.
+3. Cross-section consistency. Sections were written independently, so actively compare them:
+   do dates, week ranges and phases match between the approach, timeline and summary?
+   Are owners in tables the same roles the budget pays for? Does every section follow
+   the KEY DECISIONS? Any mismatch is an issue on the section that deviates.
+4. Technical correctness: tools, methods and steps must suit the stated technology
+   (e.g. no PostgreSQL-only tools for a SQL Server database), and steps must not contradict
+   each other (e.g. decommissioning the old system while a rollback plan depends on it).
+5. Nothing important is missing for this doc_type.
+6. No unlabelled invented facts.
 
 If the input lists planned sections that failed to generate, report each as an issue
 (using that section title) unless the document already covers it elsewhere.

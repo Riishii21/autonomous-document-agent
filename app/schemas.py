@@ -10,6 +10,8 @@ from typing import Literal
 
 from pydantic import BaseModel, Field, field_validator
 
+from .reference_data import RATE_CARD
+
 # ---------------------------------------------------------------- API layer
 
 
@@ -44,7 +46,8 @@ class Interpretation(BaseModel):
 
 # ---------------------------------------------------------- step 2: planning
 
-ToolName = Literal["draft_section", "build_table", "executive_summary", "assumptions_register"]
+ToolName = Literal["draft_section", "build_table", "estimate_costs",
+                   "executive_summary", "assumptions_register"]
 TaskStatus = Literal["pending", "done", "failed"]
 
 
@@ -60,6 +63,9 @@ class Task(BaseModel):
 
 class Plan(BaseModel):
     reasoning: str = ""
+    # Facts every section must agree on (schedule, approach, roles), decided once before
+    # sections are drafted in parallel, so independently written sections can't drift apart.
+    key_decisions: list[str] = []
     tasks: list[Task] = Field(..., min_length=2, max_length=12)
 
 
@@ -99,6 +105,30 @@ class Section(BaseModel):
     blocks: list[Block] = Field(..., min_length=1)
 
 
+# ------------------------------------------------- estimate_costs tool I/O
+
+
+class CostLineItem(BaseModel):
+    role: str
+    activity: str = ""
+    days: float = Field(..., gt=0, le=500)
+
+    @field_validator("role")
+    @classmethod
+    def role_on_rate_card(cls, v: str) -> str:
+        # Rejecting unknown roles here sends the error back to the model via the retry
+        # loop, so it can only pick rates that exist; it can never invent a price.
+        role = RATE_CARD.canonical_role(v)
+        if role is None:
+            raise ValueError(f"unknown role '{v}'; use one of: {', '.join(RATE_CARD.day_rates)}")
+        return role
+
+
+class CostEstimate(BaseModel):
+    line_items: list[CostLineItem] = Field(..., min_length=2, max_length=12)
+    notes: str = ""
+
+
 # ------------------------------------------------------- step 4: reflection
 
 
@@ -126,6 +156,13 @@ class ReflectionResult(BaseModel):
 # ----------------------------------------------------------- API response
 
 
+class UsageStats(BaseModel):
+    llm_calls: int = 0          # logical generate() calls made by the agent
+    api_requests: int = 0       # HTTP requests incl. JSON-repair retries
+    prompt_tokens: int = 0
+    completion_tokens: int = 0
+
+
 class StepLog(BaseModel):
     step: str
     detail: str
@@ -141,4 +178,6 @@ class AgentResponse(BaseModel):
     summary: str
     document_url: str
     execution_log: list[StepLog]
+    usage: UsageStats
+    models: dict[str, str] = {}
     total_duration_ms: int

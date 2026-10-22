@@ -11,7 +11,7 @@ from app import prompts
 from app.agent import DocumentAgent
 from app.llm import LLMError, OpenAICompatibleLLM, _extract_json
 from app.main import app, get_agent
-from app.schemas import Interpretation, Plan, Review, Section
+from app.schemas import CostEstimate, Interpretation, Plan, Review, Section
 
 COMPLEX_REQUEST = ("We need a plan to move our CRM to the cloud. Budget is tight but leadership wants it "
                    "done in 6 weeks with zero downtime. Not sure how many users we have.")
@@ -38,11 +38,13 @@ class FakeLLM:
                 missing_info=["number of CRM users"], conflicts=["tight budget vs 6 weeks vs zero downtime"],
                 assumptions=["~500 users", "SaaS-compatible data model"])
         if schema is Plan:
-            return Plan(reasoning="Standard project plan", tasks=[
+            return Plan(reasoning="Standard project plan",
+                        key_decisions=["Phase 1 (weeks 1-2): assessment", "Cut-over in week 6"], tasks=[
                 {"id": 1, "description": "Summary", "tool": "executive_summary", "section_title": "Executive Summary"},
                 {"id": 2, "description": "Scope", "tool": "draft_section", "section_title": "Scope and Approach"},
                 {"id": 3, "description": "Timeline", "tool": "build_table", "section_title": "Timeline"},
                 {"id": 4, "description": "Risks", "tool": "draft_section", "section_title": "Risks"},
+                {"id": 5, "description": "Budget", "tool": "estimate_costs", "section_title": "Budget Estimate"},
             ])
         if schema is Section:
             title = user.split("SECTION TO WRITE: ")[1].split("\n")[0]
@@ -59,6 +61,10 @@ class FakeLLM:
             return Section(title=title, blocks=[
                 {"type": "paragraph", "text": f"## Content for {title} with **bold** text."},
                 {"type": "bullets", "items": ["- point one", "point two"]}])
+        if schema is CostEstimate:
+            return CostEstimate(line_items=[
+                {"role": "project manager", "activity": "Coordination", "days": 10},
+                {"role": "Cloud Engineer", "activity": "Migration", "days": 20}], notes="Lean team")
         if schema is Review:
             self.reviews += 1
             if self.review_fails_first and self.reviews == 1:
@@ -100,9 +106,10 @@ def test_end_to_end_plan_reflect_and_docx(make_client, tmp_path, monkeypatch):
     assert [s["step"] for s in body["execution_log"]] == ["analyze", "plan", "execute", "reflect", "compile_docx"]
 
     # content sections ran (concurrently, any order) before the deferred executive summary
-    section_calls = [u.split("SECTION TO WRITE: ")[1].split("\n")[0] for n, u in llm.calls if n == "Section"]
-    assert set(section_calls[:3]) == {"Scope and Approach", "Timeline", "Risks"}
-    assert section_calls[3] == "Executive Summary"
+    content_calls = [u.split("SECTION TO WRITE: ")[1].split("\n")[0]
+                     for n, u in llm.calls if n in ("Section", "CostEstimate")]
+    assert set(content_calls[:4]) == {"Scope and Approach", "Timeline", "Risks", "Budget Estimate"}
+    assert content_calls[4] == "Executive Summary"
 
     # download + inspect the .docx
     monkeypatch.setattr("app.main.settings", SimpleNamespace(output_dir=tmp_path))
@@ -115,7 +122,33 @@ def test_end_to_end_plan_reflect_and_docx(make_client, tmp_path, monkeypatch):
     assert any("~500 users" in c.text for t in doc.tables for row in t.rows for c in row.cells)
     headings = [p.text for p in doc.paragraphs if p.style.name == "Heading 1"]
     assert headings == ["Executive Summary", "Scope and Approach", "Timeline", "Risks",
-                        "Cost Estimate", "Assumptions and Open Questions"]
+                        "Budget Estimate", "Cost Estimate", "Assumptions and Open Questions"]
+
+    # costs computed in code from the rate card: 10*600 + 20*750 = 21,000 + 15% = 24,150
+    cells = [c.text for t in doc.tables for row in t.rows for c in row.cells]
+    assert "Project Manager" in cells  # role normalised to rate-card spelling
+    assert "USD 21,000" in cells and "USD 3,150" in cells and "USD 24,150" in cells
+
+    # usage metering + persisted trace
+    assert body["usage"]["llm_calls"] == len(llm.calls)
+    run = client.get(f"/runs/{body['request_id']}")
+    assert run.status_code == 200 and run.json()["plan"] == body["plan"]
+
+
+def test_parallel_sections_share_key_decisions_and_outline(tmp_path):
+    """Sections are drafted in parallel, so consistency depends on the shared brief."""
+    llm = FakeLLM(review_fails_first=False)
+    DocumentAgent(llm, tmp_path).run(COMPLEX_REQUEST)
+    section_prompts = [u for n, u in llm.calls if n in ("Section", "CostEstimate")]
+    review_prompt = next(u for n, u in llm.calls if n == "Review")
+    for prompt in section_prompts + [review_prompt]:
+        assert "Cut-over in week 6" in prompt
+    assert all("Budget Estimate" in u and "Project Manager" in u for u in section_prompts)
+
+
+def test_multi_point_table_cells_render_one_per_line(tmp_path):
+    from app.docx_builder import _clean
+    assert _clean("- Encrypt data\n- Rollback snapshot") == "Encrypt data\nRollback snapshot"
 
 
 def test_tool_failure_is_isolated(make_client):
@@ -142,6 +175,18 @@ def test_numeric_table_cells_are_coerced():
     assert s.blocks[0].rows == [["Licences", "2500"], ["Contingency", ""]]
 
 
+def test_cost_estimate_rejects_roles_not_on_rate_card():
+    with pytest.raises(ValueError, match="unknown role"):
+        CostEstimate(line_items=[{"role": "Wizard", "days": 5}, {"role": "QA Engineer", "days": 5}])
+
+
+def test_separate_reviewer_model_does_the_review(tmp_path):
+    writer, reviewer = FakeLLM(review_fails_first=False), FakeLLM(review_fails_first=False)
+    DocumentAgent(writer, tmp_path, reviewer_llm=reviewer).run(COMPLEX_REQUEST)
+    assert "Review" not in [n for n, _ in writer.calls]
+    assert [n for n, _ in reviewer.calls] == ["Review"]
+
+
 def test_guardrail_rejects_non_document_request(make_client):
     r = make_client(FakeLLM(accept=False)).post("/agent", json={"request": "tell me a joke about cats please"})
     assert r.status_code == 422
@@ -157,6 +202,7 @@ def test_download_rejects_bad_ids():
     client = TestClient(app)
     assert client.get("/documents/..%2F..%2Fetc").status_code in (400, 404)
     assert client.get("/documents/abcdef1234").status_code == 404
+    assert client.get("/runs/not-an-id").status_code == 400
 
 
 # ------------------------------------------------------------- LLM layer
