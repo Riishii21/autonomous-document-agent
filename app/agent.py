@@ -8,7 +8,6 @@ so the parts that must never fail creatively stay deterministic.
 """
 from __future__ import annotations
 
-import json
 import logging
 import time
 import uuid
@@ -16,13 +15,15 @@ from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 from pathlib import Path
 
+from openai import APIError
+
 from . import prompts
 from .docx_builder import build_docx
-from .llm import LLM, Meter, MeteredLLM
+from .llm import LLM, LLMError, Meter, MeteredLLM
 from .reference_data import RATE_CARD
 from .schemas import (AgentResponse, Interpretation, Plan, ReflectionResult, Review,
                       Section, StepLog, Task)
-from .tools import DEFERRED_TOOLS, TOOL_REGISTRY, AgentContext
+from .tools import DEFERRED_TOOLS, TOOL_REGISTRY, AgentContext, render_sections_text
 
 log = logging.getLogger("agent")
 
@@ -85,10 +86,18 @@ class DocumentAgent:
                            + (f"; recovered on retry: {recovered}" if recovered else ""))
 
         with step("reflect") as s:
-            reflection = self._reflect_and_revise(plan.tasks, ctx, llm, reviewer)
-            s["detail"] = (f"score {reflection.initial_score}"
-                           + (f" -> {reflection.final_score}" if reflection.final_score else "")
-                           + f"; revised: {reflection.sections_revised or 'none'}")
+            try:
+                reflection = self._reflect_and_revise(plan.tasks, ctx, llm, reviewer)
+                s["detail"] = (f"score {reflection.initial_score}"
+                               + (f" -> {reflection.final_score}" if reflection.final_score else "")
+                               + f"; revised: {reflection.sections_revised or 'none'}")
+            except (LLMError, APIError) as exc:
+                # The drafted document is still worth returning: degrade to "unreviewed"
+                # with a warning rather than throwing away every section already written.
+                log.warning("[%s] self-check skipped: %s", request_id, exc)
+                reflection = ReflectionResult(skipped=True,
+                                              skipped_reason=f"{type(exc).__name__}: {exc}"[:300])
+                s["detail"] = "skipped: reviewer unavailable"
 
         with step("compile_docx") as s:
             sections = self._ordered_sections(plan.tasks, ctx)
@@ -101,6 +110,7 @@ class DocumentAgent:
             request_id=request_id,
             status="completed" if not failed and passed else "completed_with_warnings",
             interpretation=interp,
+            key_decisions=plan.key_decisions,
             plan=plan.tasks,
             reflection=reflection,
             summary=self._summary(interp, plan.tasks, reflection),
@@ -189,17 +199,24 @@ class DocumentAgent:
             if not revised:
                 break
             result.sections_revised += revised
-            review = self._review(tasks, ctx, reviewer)
+            try:
+                review = self._review(tasks, ctx, reviewer)
+            except (LLMError, APIError) as exc:  # keep the first review's result + the revisions
+                log.warning("Re-check after revision failed: %s", exc)
+                break
             result.final_score, result.final_passed = review.score, review.passed
+            result.remaining_issues = review.issues
         return result
 
     def _review(self, tasks: list[Task], ctx: AgentContext, reviewer: LLM) -> Review:
-        doc = [s.model_dump() for s in self._ordered_sections(tasks, ctx)]
+        # Compact plain-text rendering (not JSON) so the whole document fits; the earlier
+        # JSON version was silently cut at 16k chars and the reviewer never saw the ending.
+        doc = render_sections_text(self._ordered_sections(tasks, ctx))
         failed = [t.section_title for t in tasks if t.status == "failed"]
         user = (f"ORIGINAL REQUEST:\n{ctx.request}\n\n"
                 f"ANALYSIS:\n{ctx.interpretation.model_dump_json(indent=2)}\n\n"
                 f"KEY DECISIONS (sections must agree with these): {ctx.key_decisions}\n\n"
-                f"DRAFTED DOCUMENT:\n{json.dumps(doc)[:16000]}")
+                f"DRAFTED DOCUMENT:\n{doc}")
         if failed:  # tell the reviewer what is absent so it can request those sections again
             user += f"\n\nPLANNED SECTIONS THAT FAILED TO GENERATE (currently missing): {failed}"
         return reviewer.generate(prompts.REVIEW_SYSTEM, user, Review)
@@ -266,7 +283,12 @@ class DocumentAgent:
             parts.append(f"Made {len(interp.assumptions)} documented assumption(s).")
         if interp.conflicts:
             parts.append(f"Identified and addressed {len(interp.conflicts)} conflicting requirement(s).")
-        if r.sections_revised:
+        if r.skipped:
+            parts.append("The self-check could not run (LLM provider error), so this draft is unreviewed.")
+        elif r.sections_revised and r.final_score is None:
+            parts.append(f"Self-check scored the first draft {r.initial_score}/10 and revised "
+                         f"{len(r.sections_revised)} section(s); the re-check could not run.")
+        elif r.sections_revised:
             parts.append(f"Self-check scored the first draft {r.initial_score}/10 and revised "
                          f"{len(r.sections_revised)} section(s); final score {r.final_score}/10.")
         else:

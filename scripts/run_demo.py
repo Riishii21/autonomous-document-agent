@@ -40,19 +40,30 @@ def run(name: str, request: str) -> None:
         for item in i[label]:
             print(f"  [{label}] {item}")
 
+    if body.get("key_decisions"):
+        print("\nKey decisions (shared by all section writers):")
+        for d in body["key_decisions"]:
+            print(f"  * {d}")
+
     print("\nAgent-generated TODO list:")
     for t in body["plan"]:
         mark = {"done": "x", "failed": "!"}.get(t["status"], " ")
         print(f"  [{mark}] {t['id']}. {t['section_title']:<38} tool={t['tool']}")
 
     ref = body["reflection"]
-    print(f"\nSelf-check: score {ref['initial_score']}/10"
-          + (f" -> {ref['final_score']}/10 after revising {ref['sections_revised']}" if ref["sections_revised"] else ""))
+    if ref.get("skipped"):
+        print(f"\nSelf-check SKIPPED: {ref['skipped_reason']}")
+    else:
+        print(f"\nSelf-check: score {ref['initial_score']}/10"
+              + (f" -> {ref['final_score']}/10 after revising {ref['sections_revised']}" if ref["sections_revised"] else ""))
     for issue in ref["issues_found"]:
         print(f"  - {issue['section_title']}: {issue['problem']}")
+    for issue in ref.get("remaining_issues", []):
+        print(f"  ! still open after revision - {issue['section_title']}: {issue['problem']}")
 
     u = body["usage"]
-    print(f"\nUsage: {u['llm_calls']} LLM calls, {u['api_requests']} API requests, "
+    print(f"\nUsage: {u['llm_calls']} LLM calls, {u['api_requests']} API requests "
+          f"({u.get('api_errors', 0)} provider errors), "
           f"{u['prompt_tokens'] + u['completion_tokens']:,} tokens  (models: {body['models']})")
     print(f"Summary: {body['summary']}")
     doc = httpx.get(BASE + body["document_url"], timeout=60)

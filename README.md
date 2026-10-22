@@ -51,7 +51,7 @@ pytest -q
 | `GET` | `/runs/{request_id}` | Full trace of a past run, for auditing and debugging. |
 | `GET` | `/health` | Provider and models in use. |
 
-Errors: `422` invalid or non-document request (guardrail), `502` LLM could not produce valid output after retries, `500` no section could be generated.
+Errors: `422` invalid or non-document request (guardrail), `429` provider rate limit (with the provider's `Retry-After` passed through), `502` LLM could not produce valid output after retries, `503` provider unavailable (timeout, connection, 5xx), `500` no section could be generated. If only the self-check fails, the document is still returned, marked unreviewed (`reflection.skipped`).
 
 ## How the agent works
 
@@ -78,7 +78,7 @@ POST /agent
 |---|---|---|
 | `draft_section`, `build_table` | LLM writes the content | Prose and structure are what LLMs are good at. |
 | `executive_summary` | LLM, but deferred until all other sections exist | A summary must summarise the real content. |
-| `estimate_costs` | LLM estimates effort per role; **code** prices it from a rate card and computes totals | LLMs invent rates and get arithmetic wrong. Roles are validated against the rate card, so an unknown role is rejected and retried, never priced. |
+| `estimate_costs` | LLM picks roles, effort and non-labour items; **code** prices them from a rate card and computes totals | LLMs invent rates and get arithmetic wrong. Unknown roles or items are rejected and retried, never priced, and any figures the model writes in its free-text notes are stripped so they can't contradict the computed table. |
 | `assumptions_register` | No LLM, fully deterministic | Renders exactly what the analysis recorded, so assumptions can't drift between steps. |
 
 **Design principle:** the LLM decides *what* to do (document type, structure, content, review verdict); plain Python decides *how* it runs (dispatch, ordering, failure isolation, rendering).
@@ -91,7 +91,7 @@ Why: single-pass LLM drafts regularly drop explicit requirements, especially in 
 
 ## Observability
 
-Every response (and `/runs/{id}`) includes per-step timings, each task's status and error, the self-check result, and usage: logical LLM calls, actual API requests (the gap is JSON-repair retries) and tokens. Usage is metered per run with a thread-safe counter, because the agent instance is shared across concurrent requests.
+Every response (and `/runs/{id}`) includes the planner's key decisions, per-step timings, each task's status and error, the self-check result including any issues still open after revision, and usage: logical LLM calls, actual API requests (the gap is JSON-repair retries), provider errors (rate limits, timeouts) and tokens. Usage is metered per run with a thread-safe counter, because the agent instance is shared across concurrent requests.
 
 Optional `REVIEW_MODEL` runs the self-check on a different model than the writer, so the drafting model isn't grading its own work.
 
@@ -101,6 +101,8 @@ Optional `REVIEW_MODEL` runs the self-check on a different model than the writer
 - Rate limits (429) and transient network errors are retried with backoff by the client.
 - Groq validates JSON mode server-side and returns `400 json_validate_failed` (with the broken text attached) instead of a response. That error is caught and the broken output goes through the same self-correction retry as any other invalid output.
 - Failed sections get one recovery retry; anything still missing is reported to the reviewer.
+- The reviewer and summary read the document as compact text with a 60k-character budget (an earlier JSON version was silently cut at 16k, so the reviewer never saw the end of long documents). If the budget is ever exceeded, the cut is marked explicitly.
+- The reviewer is told cost figures are computed and correct, so it can't push the agent to inflate an estimate to match an assumed budget.
 - Numeric table cells (`2500`) are coerced to strings, since Pydantic v2 rejects int-to-str by default.
 - Markdown leaking into content (`**bold**`, `## heading`, `- item`) is converted or stripped before rendering.
 - Document ids are validated, which also blocks path traversal on the download route.

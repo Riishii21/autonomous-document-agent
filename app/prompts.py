@@ -91,13 +91,18 @@ Return JSON: {{"title": "<section title>", "blocks": [ ... ]}}"""
 
 COST_SYSTEM = """You are the estimation module of an autonomous business-document agent.
 Estimate the EFFORT (person-days) per role needed for the work in the brief.
-Do NOT give prices or totals: those are computed from the company rate card by code.
+Do NOT give prices, totals or percentages anywhere (including notes): those are computed
+from the company rate card by code.
 Use only roles from AVAILABLE ROLES, spelled exactly. 3-8 line items.
+Add other_items only for real non-labour needs, using AVAILABLE NON-LABOUR ITEMS exactly,
+with a quantity (months for monthly items, 1 for fixed items). Never use a role for a licence.
+Estimate what the work genuinely needs; don't pad the estimate to reach a budget figure.
 Respect the brief's constraints (a tight budget means a lean team; a short deadline caps total days
 per role, e.g. 6 weeks is at most 30 working days per person).
 Put the key estimating assumptions in notes (one or two sentences).
 
-Return JSON: {"line_items": [{"role": "...", "activity": "what they do", "days": 10}], "notes": "..."}"""
+Return JSON: {"line_items": [{"role": "...", "activity": "what they do", "days": 10}],
+              "other_items": [{"item": "...", "quantity": 2}], "notes": "..."}"""
 
 SUMMARY_SYSTEM = f"""You write the executive summary of a business document that has already been drafted.
 Summarise the purpose, the key points/decisions, and the recommended next step in 80-150 words.
@@ -120,6 +125,12 @@ Compare the drafted document against the ORIGINAL request and the analysis. Chec
    each other (e.g. decommissioning the old system while a rollback plan depends on it).
 5. Nothing important is missing for this doc_type.
 6. No unlabelled invented facts.
+
+About cost sections: their figures are calculated by code from a rate card and are always
+arithmetically correct. Never ask to change the arithmetic or to make totals match a target or
+an assumed budget figure. Flag a cost section only if the effort is unrealistic for the scope,
+a needed cost category is missing, or other sections contradict it. A total UNDER an assumed
+budget is a good outcome for a tight budget, not an issue.
 
 If the input lists planned sections that failed to generate, report each as an issue
 (using that section title) unless the document already covers it elsewhere.

@@ -8,6 +8,7 @@ from pathlib import Path
 
 from fastapi import Depends, FastAPI, HTTPException
 from fastapi.responses import FileResponse
+from openai import APIError, RateLimitError
 
 from .agent import AgentFailed, DocumentAgent, RequestRejected
 from .config import settings
@@ -56,6 +57,13 @@ def run_agent(body: AgentRequest, agent: DocumentAgent = Depends(get_agent)) -> 
         raise HTTPException(status_code=422, detail=f"Request rejected: {exc}")
     except LLMError as exc:
         raise HTTPException(status_code=502, detail=f"LLM failure: {exc}")
+    except RateLimitError as exc:
+        # Pass the provider's own wait time through so the client knows when to retry.
+        retry_after = exc.response.headers.get("retry-after") if exc.response is not None else None
+        raise HTTPException(status_code=429, detail=f"LLM provider rate limit: {exc.message}",
+                            headers={"Retry-After": retry_after} if retry_after else None)
+    except APIError as exc:  # timeouts, connection errors, provider 5xx
+        raise HTTPException(status_code=503, detail=f"LLM provider unavailable: {exc.message}")
     except AgentFailed as exc:
         raise HTTPException(status_code=500, detail=str(exc))
 

@@ -124,8 +124,22 @@ class CostLineItem(BaseModel):
         return role
 
 
+class CostOtherItem(BaseModel):
+    item: str
+    quantity: float = Field(1, gt=0, le=24)
+
+    @field_validator("item")
+    @classmethod
+    def item_on_rate_card(cls, v: str) -> str:
+        item = RATE_CARD.canonical_item(v)
+        if item is None:
+            raise ValueError(f"unknown item '{v}'; use one of: {', '.join(RATE_CARD.non_labour_items)}")
+        return item
+
+
 class CostEstimate(BaseModel):
     line_items: list[CostLineItem] = Field(..., min_length=2, max_length=12)
+    other_items: list[CostOtherItem] = []
     notes: str = ""
 
 
@@ -145,12 +159,15 @@ class Review(BaseModel):
 
 
 class ReflectionResult(BaseModel):
-    initial_score: int
-    initial_passed: bool
+    initial_score: int | None = None
+    initial_passed: bool | None = None
+    skipped: bool = False                 # self-check couldn't run (provider error)
+    skipped_reason: str | None = None
     issues_found: list[ReviewIssue] = []
     sections_revised: list[str] = []
     final_score: int | None = None
     final_passed: bool | None = None
+    remaining_issues: list[ReviewIssue] = []  # what the re-check still objected to
 
 
 # ----------------------------------------------------------- API response
@@ -159,6 +176,7 @@ class ReflectionResult(BaseModel):
 class UsageStats(BaseModel):
     llm_calls: int = 0          # logical generate() calls made by the agent
     api_requests: int = 0       # HTTP requests incl. JSON-repair retries
+    api_errors: int = 0         # requests that failed (rate limit, timeout, server error)
     prompt_tokens: int = 0
     completion_tokens: int = 0
 
@@ -173,6 +191,7 @@ class AgentResponse(BaseModel):
     request_id: str
     status: Literal["completed", "completed_with_warnings"]
     interpretation: Interpretation
+    key_decisions: list[str] = []
     plan: list[Task]
     reflection: ReflectionResult
     summary: str

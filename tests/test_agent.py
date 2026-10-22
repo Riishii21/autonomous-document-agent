@@ -64,7 +64,9 @@ class FakeLLM:
         if schema is CostEstimate:
             return CostEstimate(line_items=[
                 {"role": "project manager", "activity": "Coordination", "days": 10},
-                {"role": "Cloud Engineer", "activity": "Migration", "days": 20}], notes="Lean team")
+                {"role": "Cloud Engineer", "activity": "Migration", "days": 20}],
+                other_items=[{"item": "migration tooling licence (per month)", "quantity": 2}],
+                notes="Lean team over 6 weeks. Total is $48,480 plus 10% contingency = $50,000.")
         if schema is Review:
             self.reviews += 1
             if self.review_fails_first and self.reviews == 1:
@@ -124,10 +126,15 @@ def test_end_to_end_plan_reflect_and_docx(make_client, tmp_path, monkeypatch):
     assert headings == ["Executive Summary", "Scope and Approach", "Timeline", "Risks",
                         "Budget Estimate", "Cost Estimate", "Assumptions and Open Questions"]
 
-    # costs computed in code from the rate card: 10*600 + 20*750 = 21,000 + 15% = 24,150
+    # costs computed in code: labour 10*600 + 20*750 = 21,000; licence 2*1,500 = 3,000;
+    # subtotal 24,000 + 15% contingency 3,600 = 27,600
     cells = [c.text for t in doc.tables for row in t.rows for c in row.cells]
     assert "Project Manager" in cells  # role normalised to rate-card spelling
-    assert "USD 21,000" in cells and "USD 3,150" in cells and "USD 24,150" in cells
+    assert "Migration tooling licence (per month)" in cells
+    assert {"USD 24,000", "USD 3,600", "USD 27,600"} <= set(cells)
+    # the model's own arithmetic in its notes must not reach the document
+    assert "50,000" not in text and "48,480" not in text and "Lean team over 6 weeks." in text
+    assert body["key_decisions"] == ["Phase 1 (weeks 1-2): assessment", "Cut-over in week 6"]
 
     # usage metering + persisted trace
     assert body["usage"]["llm_calls"] == len(llm.calls)
@@ -149,6 +156,65 @@ def test_parallel_sections_share_key_decisions_and_outline(tmp_path):
 def test_multi_point_table_cells_render_one_per_line(tmp_path):
     from app.docx_builder import _clean
     assert _clean("- Encrypt data\n- Rollback snapshot") == "Encrypt data\nRollback snapshot"
+
+
+def test_reviewer_sees_whole_long_document(tmp_path):
+    """Regression: the reviewer input used to be JSON cut at 16k chars, hiding the ending."""
+    from app.tools import render_sections_text
+    long = [Section(title=f"S{i}", blocks=[{"type": "paragraph", "text": "x" * 3000}]) for i in range(8)]
+    long.append(Section(title="Final Section", blocks=[{"type": "paragraph", "text": "END-MARKER"}]))
+    text = render_sections_text(long)
+    assert len(text) > 16_000 and "END-MARKER" in text and "TRUNCATED" not in text
+
+
+def test_remaining_issues_recorded_when_recheck_still_fails(tmp_path):
+    class StubbornReviewer(FakeLLM):
+        def generate(self, system, user, schema):
+            self.calls.append((schema.__name__, user))
+            return Review(passed=False, score=6, issues=[
+                {"section_title": "Risks", "problem": "still weak", "fix_instruction": "add more"}])
+    r = DocumentAgent(FakeLLM(), tmp_path, reviewer_llm=StubbornReviewer()).run(COMPLEX_REQUEST)
+    assert r.reflection.final_score == 6 and r.reflection.remaining_issues[0].problem == "still weak"
+    assert r.status == "completed_with_warnings"
+
+
+def test_cost_notes_keep_effort_but_drop_money():
+    from app.tools import _strip_figures
+    assert _strip_figures("Total is $48,480 plus 10% contingency. Lean team over 6 weeks.") == \
+        "Lean team over 6 weeks."
+
+
+def test_cost_estimate_rejects_unknown_non_labour_item():
+    with pytest.raises(ValueError, match="unknown item"):
+        CostEstimate(line_items=[{"role": "QA Engineer", "days": 5}, {"role": "Trainer", "days": 1}],
+                     other_items=[{"item": "Gold-plated servers", "quantity": 1}])
+
+
+def test_reviewer_outage_returns_unreviewed_document(tmp_path):
+    """A provider error during the self-check must not throw away the drafted document."""
+    class DownReviewer(FakeLLM):
+        def generate(self, system, user, schema):
+            raise LLMError("provider rate limit")
+    r = DocumentAgent(FakeLLM(), tmp_path, reviewer_llm=DownReviewer()).run(COMPLEX_REQUEST)
+    assert r.reflection.skipped and "rate limit" in r.reflection.skipped_reason
+    assert r.status == "completed_with_warnings" and "unreviewed" in r.summary
+    assert (tmp_path / f"{r.request_id}.docx").exists()
+
+
+def test_provider_rate_limit_maps_to_429_with_retry_after(make_client):
+    import httpx
+    from openai import RateLimitError
+
+    class Limited:
+        def run(self, request):
+            resp = httpx.Response(429, headers={"retry-after": "120"},
+                                  request=httpx.Request("POST", "http://x"))
+            raise RateLimitError("Rate limit reached: tokens per day", response=resp, body=None)
+
+    app.dependency_overrides[get_agent] = lambda: Limited()
+    r = TestClient(app).post("/agent", json={"request": COMPLEX_REQUEST})
+    assert r.status_code == 429 and r.headers["retry-after"] == "120"
+    assert "tokens per day" in r.json()["detail"]
 
 
 def test_tool_failure_is_isolated(make_client):
@@ -266,6 +332,23 @@ def test_llm_reraises_other_bad_requests():
     from openai import BadRequestError
     with pytest.raises(BadRequestError):
         llm.generate("sys", "user", Review)
+
+
+def test_provider_errors_are_metered():
+    import httpx
+    from openai import RateLimitError
+    from app.llm import Meter
+    llm = OpenAICompatibleLLM("http://x", "k", "m")
+
+    def create(**kw):
+        resp = httpx.Response(429, request=httpx.Request("POST", "http://x"))
+        raise RateLimitError("slow down", response=resp, body=None)
+
+    llm._client = SimpleNamespace(chat=SimpleNamespace(completions=SimpleNamespace(create=create)))
+    meter = Meter()
+    with pytest.raises(RateLimitError):
+        llm.generate("sys", "user", Review, meter=meter)
+    assert meter.usage.api_errors == 1 and meter.usage.api_requests == 1
 
 
 def test_llm_gives_up_after_retries():

@@ -11,6 +11,8 @@ Tools differ in how much they trust the model:
 from __future__ import annotations
 
 import json
+import logging
+import re
 from dataclasses import dataclass, field
 from typing import Callable
 
@@ -18,6 +20,8 @@ from . import prompts
 from .llm import LLM
 from .reference_data import RATE_CARD
 from .schemas import Block, CostEstimate, Interpretation, Section, Task
+
+log = logging.getLogger("agent.tools")
 
 
 @dataclass
@@ -79,41 +83,91 @@ def estimate_costs(task: Task, ctx: AgentContext, llm: LLM, feedback: str | None
     """Hybrid tool: the LLM estimates effort, deterministic code does the pricing and maths.
 
     LLMs are unreliable at arithmetic and will happily invent rates, so the model only
-    chooses roles (validated against the rate card) and person-days."""
+    chooses roles/items (validated against the rate card) and quantities. Its free-text
+    notes are also stripped of any figures, so model arithmetic can't leak back in."""
     rc = RATE_CARD
     prompt = (_section_prompt(task, ctx, feedback)
-              + f"\n\nAVAILABLE ROLES: {', '.join(rc.day_rates)}")
+              + f"\n\nAVAILABLE ROLES: {', '.join(rc.day_rates)}"
+              + f"\nAVAILABLE NON-LABOUR ITEMS: {', '.join(rc.non_labour_items)}")
     est = llm.generate(prompts.COST_SYSTEM, prompt, CostEstimate)
 
-    rows, subtotal, total_days = [], 0.0, 0.0
+    rows, labour, total_days = [], 0.0, 0.0
     for item in est.line_items:
         rate = rc.day_rates[item.role]
-        cost = rate * item.days
-        subtotal += cost
+        labour += rate * item.days
         total_days += item.days
-        rows.append([item.role, item.activity, f"{item.days:g}", rc.money(rate), rc.money(cost)])
+        rows.append([item.role, item.activity, f"{item.days:g} days", rc.money(rate),
+                     rc.money(rate * item.days)])
+    other = 0.0
+    for o in est.other_items:
+        price = rc.non_labour_items[o.item]
+        other += price * o.quantity
+        rows.append([o.item, "Non-labour", f"x {o.quantity:g}", rc.money(price),
+                     rc.money(price * o.quantity)])
+
+    subtotal = labour + other
     contingency = subtotal * rc.contingency_pct / 100
+    total = subtotal + contingency
     rows += [
-        ["Subtotal", "", f"{total_days:g}", "", rc.money(subtotal)],
+        ["Subtotal", "", f"{total_days:g} days", "", rc.money(subtotal)],
         [f"Contingency ({rc.contingency_pct:g}%)", "", "", "", rc.money(contingency)],
-        ["**Estimated total**", "", "", "", f"**{rc.money(subtotal + contingency)}**"],
+        ["**Estimated total**", "", "", "", f"**{rc.money(total)}**"],
     ]
+    notes = _strip_figures(est.notes)
     blocks = [
         Block(type="paragraph", text=(
-            f"Estimated delivery cost: {rc.money(subtotal + contingency)} "
-            f"({total_days:g} person-days, including {rc.contingency_pct:g}% contingency).")),
-        Block(type="table", headers=["Role", "Activity", "Effort (days)", "Day rate", "Cost"], rows=rows),
+            f"Estimated delivery cost: {rc.money(total)} (labour {rc.money(labour)} for "
+            f"{total_days:g} person-days, non-labour {rc.money(other)}, plus "
+            f"{rc.contingency_pct:g}% contingency).")),
+        Block(type="table", headers=["Item", "Activity", "Quantity", "Unit rate", "Cost"], rows=rows),
         Block(type="paragraph", text=(
             "Effort figures are estimates; rates come from the reference rate card (illustrative "
             "data) and all totals are calculated, not generated."
-            + (f" Basis: {est.notes}" if est.notes else ""))),
+            + (f" Basis: {notes}" if notes else ""))),
     ]
     return Section(title=task.section_title, blocks=blocks)
 
 
+_MONEY = re.compile(r"(?:[$\u20ac\u00a3\u20b9]|\b(?:USD|INR|EUR|GBP)\b)\s?\d|\d\s?%|\b\d[\d,.]*\s?[kK]\b")
+
+
+def _strip_figures(notes: str) -> str:
+    """Drop any sentence in the model's notes that states money, percentages or totals.
+    The computed table is the single source of truth for numbers."""
+    sentences = re.split(r"(?<=[.!?])\s+", notes.strip())
+    return " ".join(s for s in sentences if s and not _MONEY.search(s))
+
+
+MAX_DOC_CHARS = 60_000  # ~15k tokens; far above a normal business document
+
+
+def render_sections_text(sections: list[Section]) -> str:
+    """Compact plain-text view of the document for LLM consumption (reviewer, summary).
+
+    JSON costs ~2x the characters of the same content as text. If the limit is ever hit,
+    the cut is marked explicitly so the model knows it isn't seeing everything."""
+    out: list[str] = []
+    for s in sections:
+        out.append(f"## {s.title}")
+        for b in s.blocks:
+            if b.type == "paragraph" and b.text:
+                out.append(b.text)
+            elif b.type in ("bullets", "numbered") and b.items:
+                out += [f"- {i}" for i in b.items]
+            elif b.type == "table" and b.headers:
+                out.append(" | ".join(b.headers))
+                out += [" | ".join(c.replace("\n", "; ") for c in r) for r in (b.rows or [])]
+        out.append("")
+    text = "\n".join(out)
+    if len(text) > MAX_DOC_CHARS:
+        log.warning("Document text truncated for LLM input (%d chars)", len(text))
+        text = text[:MAX_DOC_CHARS] + "\n[... DOCUMENT TRUNCATED: remaining content not shown ...]"
+    return text
+
+
 def executive_summary(task: Task, ctx: AgentContext, llm: LLM, feedback: str | None = None) -> Section:
-    drafted = [s.model_dump() for tid, s in sorted(ctx.sections.items()) if tid != task.id]
-    prompt = (f"DOCUMENT BRIEF:\n{ctx.brief()}\n\nDRAFTED SECTIONS:\n{json.dumps(drafted)[:12000]}"
+    drafted = [s for tid, s in sorted(ctx.sections.items()) if tid != task.id]
+    prompt = (f"DOCUMENT BRIEF:\n{ctx.brief()}\n\nDRAFTED SECTIONS:\n{render_sections_text(drafted)}"
               f"\n\nSECTION TO WRITE: {task.section_title}")
     if feedback:
         prompt += f"\n\nREVIEWER FEEDBACK TO FIX IN THIS VERSION: {feedback}"

@@ -15,5 +15,12 @@
     "UX Designer": 600,
     "Trainer": 450,
     "Support Engineer": 400
+  },
+  "non_labour_items": {
+    "Migration tooling licence (per month)": 1500,
+    "Cloud infrastructure during parallel run (per month)": 2500,
+    "Temporary network bandwidth upgrade (per month)": 800,
+    "External security review (fixed)": 4000,
+    "User training materials (fixed)": 1000
   }
 }

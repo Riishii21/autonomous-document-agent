@@ -11,7 +11,7 @@ import re
 import threading
 from typing import Protocol, TypeVar
 
-from openai import BadRequestError, OpenAI
+from openai import APIError, BadRequestError, OpenAI
 from pydantic import BaseModel, ValidationError
 
 from .schemas import UsageStats
@@ -44,6 +44,11 @@ class Meter:
             self.usage.api_requests += 1
             self.usage.prompt_tokens += prompt_tokens
             self.usage.completion_tokens += completion_tokens
+
+    def record_error(self) -> None:
+        with self._lock:
+            self.usage.api_requests += 1
+            self.usage.api_errors += 1
 
 
 class MeteredLLM:
@@ -114,16 +119,24 @@ class OpenAICompatibleLLM:
                     meter.record_request(getattr(u, "prompt_tokens", 0) or 0,
                                          getattr(u, "completion_tokens", 0) or 0)
             except BadRequestError as exc:
-                if meter:
-                    meter.record_request()
                 # Groq validates JSON mode server-side: malformed output comes back as a
                 # 400 json_validate_failed (with the bad text attached) instead of a response.
                 # Treat it like any other invalid output so the self-correction loop handles it.
                 raw = _failed_generation(exc)
-                if raw is None:
+                if raw is None:  # a genuine bad request: not ours to repair
+                    if meter:
+                        meter.record_error()
                     raise
+                if meter:
+                    meter.record_request()
                 log.warning("Provider rejected malformed JSON for %s (attempt %d)",
                             schema.__name__, attempt + 1)
+            except APIError:
+                # Rate limit / timeout / 5xx that survived the SDK's own backoff retries.
+                # Counted so the response shows when the provider, not the model, was the problem.
+                if meter:
+                    meter.record_error()
+                raise
             try:
                 return schema.model_validate(json.loads(_extract_json(raw)))
             except (json.JSONDecodeError, ValidationError) as exc:
